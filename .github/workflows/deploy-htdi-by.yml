@@ -1,0 +1,50 @@
+# Bridge deploy: CF secrets are on this repo; site source is Lex212mont/htdi.by.
+# Also mirrors CLOUDFLARE_* (+ Telegram) secrets onto htdi.by when SYNC_TOKEN is set.
+name: Deploy htdi.by to Cloudflare Pages
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: write
+    name: Deploy htdi.by
+    steps:
+      - name: Checkout htdi.by
+        uses: actions/checkout@v4
+        with:
+          repository: Lex212mont/htdi.by
+          ref: main
+          fetch-depth: 1
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy . --project-name=htdi-by
+
+  sync-secrets:
+    runs-on: ubuntu-latest
+    name: Mirror secrets to htdi.by
+    steps:
+      - name: Sync Cloudflare + Telegram secrets
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "SYNC_TOKEN not set — skip mirror (deploy still runs)."
+            exit 0
+          fi
+          printf '%s' "$CF_API_TOKEN" | gh secret set CLOUDFLARE_API_TOKEN -R Lex212mont/htdi.by
+          printf '%s' "$CF_ACCOUNT_ID" | gh secret set CLOUDFLARE_ACCOUNT_ID -R Lex212mont/htdi.by
+          if [ -n "${TG_TOKEN}" ]; then
+            printf '%s' "$TG_TOKEN" | gh secret set TELEGRAM_BOT_TOKEN -R Lex212mont/htdi.by
+          fi
+          echo "Mirrored secrets to Lex212mont/htdi.by"
