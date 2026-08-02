@@ -1,4 +1,22 @@
 // Cloudflare Pages _worker.js — RSS Proxy + Expert News API
+
+const BLOCKED_DOMAINS = ['dev.by'];
+
+function isBlockedNewsItem(item) {
+  const haystack = [
+    item?.link,
+    item?.url,
+    item?.title,
+    item?.source,
+    item?.summary,
+  ].filter(Boolean).join(' ').toLowerCase();
+  return BLOCKED_DOMAINS.some((domain) => haystack.includes(domain));
+}
+
+function filterNewsItems(items) {
+  return (Array.isArray(items) ? items : []).filter((item) => !isBlockedNewsItem(item));
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -24,6 +42,10 @@ export default {
       if (!['http:', 'https:'].includes(parsed.protocol)) {
         return new Response(JSON.stringify({ error: 'Protocol not allowed' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } });
       }
+      const host = parsed.hostname.toLowerCase();
+      if (host === 'dev.by' || host.endsWith('.dev.by')) {
+        return new Response(JSON.stringify({ error: 'Source blocked' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } });
+      }
       try {
         const resp = await fetch(rawUrl, {
           headers: {
@@ -45,17 +67,27 @@ export default {
     // ── GET /api/expert-news — читаем expert-news.json из GitHub ──
     if (url.pathname === '/api/expert-news' && request.method === 'GET') {
       try {
+        const bust = Date.now();
         const ghResp = await fetch(
-          'https://api.github.com/repos/Lex212mont/htdi-news/contents/expert-news.json',
-          { headers: { 'User-Agent': 'htdi-news-worker', 'Accept': 'application/vnd.github+json' } }
+          `https://raw.githubusercontent.com/Lex212mont/htdi.by/main/expert-news.json?t=${bust}`,
+          {
+            headers: { 'User-Agent': 'htdi-by-worker', 'Accept': 'application/json' },
+            cf: { cacheTtl: 60, cacheEverything: false },
+          }
         );
-        if (!ghResp.ok) throw new Error(`GitHub ${ghResp.status}`);
-        const data = await ghResp.json();
-        // Правильное декодирование UTF-8 из base64 (исправляет кракозябры в кириллице)
-        const binaryStr = atob(data.content.replace(/\n/g, ''));
-        const bytes = Uint8Array.from(binaryStr, c => c.charCodeAt(0));
-        const content = new TextDecoder('utf-8').decode(bytes);
-        return new Response(content, { status: 200, headers: { ...CORS, 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'public, s-maxage=300, max-age=60, stale-while-revalidate=3600' } });
+        if (!ghResp.ok) throw new Error(`GitHub raw ${ghResp.status}`);
+        const content = await ghResp.text();
+        let items = [];
+        try { items = JSON.parse(content); } catch { items = []; }
+        const filtered = filterNewsItems(items);
+        return new Response(JSON.stringify(filtered), {
+          status: 200,
+          headers: {
+            ...CORS,
+            'Content-Type': 'application/json; charset=utf-8',
+            'Cache-Control': 'public, max-age=60, s-maxage=60, stale-while-revalidate=300',
+          },
+        });
       } catch (e) {
         return new Response(JSON.stringify([]), { status: 200, headers: { ...CORS, 'Content-Type': 'application/json' } });
       }
@@ -84,10 +116,14 @@ export default {
         return new Response(JSON.stringify({ error: 'title and link required' }), { status: 400, headers: { ...CORS, 'Content-Type': 'application/json' } });
       }
 
+      if (isBlockedNewsItem({ title, summary, link, source })) {
+        return new Response(JSON.stringify({ error: 'Source is blocked' }), { status: 403, headers: { ...CORS, 'Content-Type': 'application/json' } });
+      }
+
       // Получаем текущий файл + sha
       const getResp = await fetch(
-        'https://api.github.com/repos/Lex212mont/htdi-news/contents/expert-news.json',
-        { headers: { 'Authorization': `Bearer ${GITHUB_TOKEN}`, 'User-Agent': 'htdi-news-worker', 'Accept': 'application/vnd.github+json' } }
+        'https://api.github.com/repos/Lex212mont/htdi.by/contents/expert-news.json',
+        { headers: { 'Authorization': `Bearer ${GITHUB_TOKEN}`, 'User-Agent': 'htdi-by-worker', 'Accept': 'application/vnd.github+json' } }
       );
       if (!getResp.ok) return new Response(JSON.stringify({ error: 'Cannot read file' }), { status: 502, headers: { ...CORS, 'Content-Type': 'application/json' } });
       const fileData = await getResp.json();
@@ -103,15 +139,15 @@ export default {
         source: source || 'НТДИ',
         date: new Date().toISOString().slice(0, 10),
       };
-      const updated = [newEntry, ...existing];
+      const updated = [newEntry, ...filterNewsItems(existing)];
 
       // Обновляем файл через GitHub API
       const newContent = btoa(unescape(encodeURIComponent(JSON.stringify(updated, null, 2))));
       const putResp = await fetch(
-        'https://api.github.com/repos/Lex212mont/htdi-news/contents/expert-news.json',
+        'https://api.github.com/repos/Lex212mont/htdi.by/contents/expert-news.json',
         {
           method: 'PUT',
-          headers: { 'Authorization': `Bearer ${GITHUB_TOKEN}`, 'User-Agent': 'htdi-news-worker', 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' },
+          headers: { 'Authorization': `Bearer ${GITHUB_TOKEN}`, 'User-Agent': 'htdi-by-worker', 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' },
           body: JSON.stringify({ message: `Add expert news: ${title}`, content: newContent, sha }),
         }
       );
